@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -40,8 +41,12 @@ import strava_uploader
 load_dotenv()
 
 ROOT = Path(__file__).parent
-HISTORY = ROOT / "history.json"
-LOG_FILE = ROOT / "sync.log"
+# Persist history + log on the mounted volume when DATA_DIR is set (Fly.io),
+# so they survive restarts; else keep them next to the code (local dev).
+_DATA_DIR = Path(os.environ["DATA_DIR"]) if os.environ.get("DATA_DIR") else ROOT
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY = _DATA_DIR / "history.json"
+LOG_FILE = _DATA_DIR / "sync.log"
 
 logging.basicConfig(
     level=logging.INFO,

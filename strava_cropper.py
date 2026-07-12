@@ -3,8 +3,8 @@
 preserved. See docs/journey.md Approach 7 for context.
 
 Needs `STRAVA_SESSION_COOKIE` (captured from a logged-in browser) because the
-OAuth API doesn't expose /truncate. The cookie auto-rotates back to .env /
-Railway env vars after each successful POST.
+OAuth API doesn't expose /truncate. The cookie auto-rotates back to .env (and
+the persistent volume when deployed) after each successful POST.
 """
 from __future__ import annotations
 

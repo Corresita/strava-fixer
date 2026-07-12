@@ -1,7 +1,8 @@
 """Garmin Connect login with cached OAuth1 token.
 
-First login is interactive (MFA via prompt_mfa). After that, the token in
-./garmin_tokens/ lives ~1 year and subsequent runs skip the SSO entirely.
+First login is interactive (MFA via prompt_mfa). After that, the token cache
+lets subsequent runs skip the SSO entirely. The cache lives on the persistent
+volume ($DATA_DIR/garmin_tokens) when DATA_DIR is set, else in ./garmin_tokens.
 """
 from __future__ import annotations
 
@@ -10,7 +11,8 @@ from pathlib import Path
 
 from garminconnect import Garmin
 
-TOKENSTORE = Path(__file__).parent / "garmin_tokens"
+_DATA_DIR = os.environ.get("DATA_DIR", "")
+TOKENSTORE = (Path(_DATA_DIR) if _DATA_DIR else Path(__file__).parent) / "garmin_tokens"
 
 
 def _prompt_mfa() -> str:

@@ -289,7 +289,21 @@ Garmin watch ──▶ Garmin Connect ──▶ Strava (auto-sync, original dist
 
 iOS Shortcut and the CLI are kept as backup paths against the day the webhook or the crop form changes. Three different triggers, one shared crop function.
 
-**Cost of ownership at v2.4:** nothing. The cookie auto-rotates, the OAuth tokens auto-refresh, the Garmin token is good for a year. The only manual operation is rotating the Garmin token annually.
+**Cost of ownership at v2.4:** almost nothing. The cookie auto-rotates, the OAuth tokens auto-refresh. The one manual step is re-issuing the Garmin token when it expires — which turned out to be **monthly**, not annual (see the epilogue).
+
+## Epilogue: the hosting migration (v2.5)
+
+Two things broke the "set it and forget it" promise, about a month after v2.4 shipped:
+
+1. **The Garmin OAuth1 token expired in ~3-4 weeks, not a year.** The iOS Shortcut started prompting for MFA on every tap — because the server, unable to use the stale cached token, fell back to a fresh SSO login whose MFA prompt nothing on the server side could answer. Lesson banked: *don't trust a vendor's implied token lifetime; measure it.* The fix is unavoidably manual (Garmin MFA can't be automated safely), so it's now documented as a monthly touch instead of annual.
+
+2. **Railway's free trial credit ran out.** No permanent free tier; the cheapest always-on option is $5/mo. Rather than pay Railway's floor, migrated to Fly.io (~$2/mo for one 256 MB machine).
+
+The migration also let us **replace the credential-persistence mechanism**. On Railway, rotated tokens were pushed back via the platform's GraphQL variable API — which *triggers a container restart on every write*, a latent hazard (a token refresh mid-webhook could kill an in-flight crop). Fly's equivalent secrets API has the same restart behavior, so instead we mounted a **persistent volume** and write rotating credentials to a file on it. No API call, no restart, and it survives redeploys. The Garmin token cache, `history.json`, and `sync.log` moved onto the volume too.
+
+Verified end to end on Fly 2026-07-11: the one real unknown — whether Strava's `_strava4_session` cookie would be honored from a datacenter IP for the crop POST — came back fine.
+
+**Cost of ownership at v2.5:** ~$2/mo, plus re-issuing the Garmin token monthly. Everything else self-maintains.
 
 ## Lessons
 
@@ -301,6 +315,8 @@ iOS Shortcut and the CLI are kept as backup paths against the day the webhook or
 - **Token rotation doesn't mean token replacement.** After regenerating Strava's Client Secret and re-authorizing, the old refresh token was still active (Strava reuses refresh tokens across re-auths within the same grant context). We had to explicitly *revoke* the app in Strava settings before reauth would actually mint a new refresh token.
 - **The right architecture from day one was a webhook.** v1.0 was a Flask service receiving Strava activity-create events on Railway. v2.4 is — almost identically — a Flask service receiving Strava activity-create events on Railway. Six versions in between were all wrong about the *call to make on the event*, not wrong about the trigger shape. The discovery work (web Crop form, session-cookie auth, CSRF parsing, floor display) was the entire content of those six versions. Architecturally, the project ends where it started.
 - **Verify on the actual UI, not the API response.** Today's crop log said `27.2680m → 27.27 km`. The Strava API echoed that distance. Strava's web UI displayed `27.26 km`. The whole `27.27 → 27.26` floor-display bug would have been visible if the first crop test had ended with a screenshot of Strava's activity page, not just a JSON dump.
+- **Persist credentials without triggering restarts.** Both Railway's and Fly's "set a secret" APIs redeploy the machine. Using them for per-request token rotation means a refresh mid-webhook can restart the container and kill an in-flight job. A file on a mounted volume persists just as well, with no restart and no API call.
+- **Measure token lifetimes; don't trust the implied number.** The Garmin token was assumed good for ~a year; it expired in under a month and broke the whole trigger silently. The failure mode (server falling back to an un-answerable MFA prompt) was invisible until the phone shortcut started asking for codes.
 
 ## Archive
 

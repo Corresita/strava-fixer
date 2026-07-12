@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.5.0] - 2026-07-11
+
+Migrate off Railway (its free trial credit ran out) to Fly.io. One always-on
+256 MB machine, ~$2/mo, no cold starts. Credential persistence moves from
+Railway's env-var API to a mounted volume — simpler, and it doesn't trigger a
+restart on every token rotation.
+
+### Added
+- `Dockerfile`, `fly.toml` — Fly.io deployment. A 1 GB volume mounts at
+  `/data`; `DATA_DIR=/data` routes the credential store, Garmin token cache,
+  `history.json`, and `sync.log` onto it so they survive restarts and redeploys.
+- `strava_uploader.load_persisted_creds()` / `_write_volume_creds()` — rotating
+  Strava tokens + `_strava4_session` cookie are persisted to `$DATA_DIR/creds.env`
+  and re-applied over the deploy-time secrets on startup.
+
+### Changed
+- `garmin_client` and `sync_server` bootstrap the Garmin token cache under
+  `$DATA_DIR` when set, else the repo dir (local dev unchanged).
+- `subscribe_webhook.py` default callback URL → `strava-distance-fixer.fly.dev`;
+  wrapped its body in `main()` so importing it no longer fires a live API call.
+
+### Removed
+- `railway.toml`, `Procfile`, and `_railway_upsert_vars()` — Railway is gone.
+  The `RAILWAY_*` env vars are dropped from `.env.example`.
+
+### Verified
+- 2026-07-11: full pipeline runs on Fly — Garmin token loads from the volume,
+  Strava OAuth refreshes, and the `_strava4_session` cookie crops successfully
+  from Fly's datacenter IP (23561601674 → 11.11 km). Volume holds `creds.env`,
+  `garmin_tokens/`, `history.json`, `sync.log` across restarts.
+
+---
+
 ## [2.4.0] - 2026-05-18
 
 Full automation. Strava pushes activity-create events to `/strava-webhook` on Railway; sync_server spawns a background thread that crops the activity in ~5 seconds. No phone tap, no laptop. iOS Shortcut and CLI are kept as backup paths against the day the webhook or the crop form changes.

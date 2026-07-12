@@ -1,9 +1,13 @@
 """Strava OAuth token refresh + activity search.
 
 Refresh is invoked transparently by `get_access_token()` when expired. Refreshed
-values (and any other env updates passed through `_persist_env`) are written to
-both `.env` (local) and Railway's project variables (when the four `RAILWAY_*`
-env vars are configured), so tokens survive container restarts.
+values (and any other env updates passed through `_persist_env`) are written to:
+  - `.env` (local dev), and
+  - `$DATA_DIR/creds.env` on a persistent disk when `DATA_DIR` is set (e.g. a
+    Fly.io volume mounted at /data), so the rotating Strava session cookie and
+    refreshed OAuth tokens survive container restarts and redeploys.
+`load_persisted_creds()` is called at import time to apply any values saved on
+the volume on top of the deploy-time secrets.
 """
 from __future__ import annotations
 
@@ -16,6 +20,32 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Persistent-disk location for rotating credentials. On Fly.io this is a mounted
+# volume; locally it's unset and we fall back to .env only.
+_DATA_DIR = os.environ.get("DATA_DIR", "")
+# Keys we persist to the volume so they survive restarts.
+_PERSISTED_KEYS = ("ACCESS_TOKEN", "REFRESH_TOKEN", "EXPIRES_AT", "STRAVA_SESSION_COOKIE")
+
+
+def _creds_path() -> Path | None:
+    return Path(_DATA_DIR) / "creds.env" if _DATA_DIR else None
+
+
+def load_persisted_creds() -> None:
+    """Apply credentials saved on the persistent volume over the deploy-time
+    env vars. The volume copy is newer (it holds rotated values), so it wins."""
+    p = _creds_path()
+    if not p or not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            if k in _PERSISTED_KEYS and v:
+                os.environ[k] = v
+
+
+load_persisted_creds()
 
 # Spoofing a real Chrome UA avoids a 401 some Strava endpoints return for the
 # default `python-requests/X.Y` UA on cloud IPs.
@@ -35,43 +65,31 @@ def _env(key: str) -> str:
     return val
 
 
-def _railway_upsert_vars(updates: dict[str, str]) -> None:
-    """Push env updates to Railway so they survive container restarts.
-    Silently noops without the four RAILWAY_* env vars configured."""
-    api_token = os.environ.get("RAILWAY_API_TOKEN", "")
-    project_id = os.environ.get("RAILWAY_PROJECT_ID", "")
-    service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
-    environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
-    if not all((api_token, project_id, service_id, environment_id)):
+def _write_volume_creds(updates: dict[str, str]) -> None:
+    """Persist rotating credentials to the mounted volume so they survive
+    restarts and redeploys. Noops when DATA_DIR isn't set (local dev).
+    Unlike a platform-secrets API call, writing a file triggers no restart."""
+    p = _creds_path()
+    if not p:
         return
-    try:
-        r = requests.post(
-            "https://backboard.railway.app/graphql/v2",
-            headers={"Authorization": f"Bearer {api_token}", "User-Agent": _UA},
-            json={
-                "query": "mutation V($i: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $i) }",
-                "variables": {"i": {
-                    "projectId": project_id,
-                    "serviceId": service_id,
-                    "environmentId": environment_id,
-                    "variables": updates,
-                }},
-            },
-            timeout=10,
-        )
-        body = r.json()
-        if "errors" in body:
-            print(f"[railway] var upsert failed: {body['errors']}", flush=True)
-        else:
-            print(f"[railway] updated {list(updates.keys())}", flush=True)
-    except Exception as e:
-        print(f"[railway] var upsert error: {e}", flush=True)
+    persisted = {k: v for k, v in updates.items() if k in _PERSISTED_KEYS}
+    if not persisted:
+        return
+    existing: dict[str, str] = {}
+    if p.exists():
+        for line in p.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                existing[k] = v
+    existing.update(persisted)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n")
+    print(f"[volume] persisted {list(persisted.keys())} to {p}", flush=True)
 
 
 def _persist_env(updates: dict[str, str]) -> None:
-    """Patch os.environ, write to local .env if present, push to Railway if
-    configured. On Railway containers .env doesn't exist — that branch noops
-    and the Railway upsert is what makes the change survive restarts."""
+    """Patch os.environ, write to local .env if present, and persist rotating
+    credentials to the mounted volume (Fly.io) so they survive restarts."""
     for k, v in updates.items():
         os.environ[k] = v
 
@@ -89,7 +107,7 @@ def _persist_env(updates: dict[str, str]) -> None:
                 lines.append(f"{k}={v}")
         env_path.write_text("\n".join(lines) + "\n")
 
-    _railway_upsert_vars(updates)
+    _write_volume_creds(updates)
 
 
 def get_access_token() -> str:

@@ -15,7 +15,7 @@ Garmin watch ──▶ Garmin Connect ──▶ Strava (auto-sync, original dist
                                             │
                                             │ activity-create event
                                             ▼
-                                    POST /strava-webhook  ──▶ sync_server (on Railway)
+                                    POST /strava-webhook  ──▶ sync_server (on Fly.io)
                                                                     │
                                                                     │ POST /activities/{id}/truncate
                                                                     ▼   (start_index=0, end_index=N)
@@ -62,7 +62,7 @@ All three end up calling `strava_cropper.crop_to_distance()` with the same targe
 - Strava API app credentials (https://www.strava.com/settings/api) with `activity:read_all` scope.
 - A Strava web session cookie (`_strava4_session`) captured from a logged-in browser — see `.env.example`.
 - Python 3.12+, dependencies in `requirements.txt`.
-- A publicly reachable HTTPS endpoint for the webhook (Railway works well; the repo has `Procfile` + `railway.toml`).
+- A publicly reachable HTTPS host for the webhook. The repo is set up for Fly.io (`Dockerfile` + `fly.toml`, ~$2/mo for one always-on 256 MB machine).
 
 ## Setup
 
@@ -80,34 +80,37 @@ python reauth_strava.py
 
 Strava app's "Authorization Callback Domain" in https://www.strava.com/settings/api must be `localhost` for `reauth_strava.py` to receive the OAuth callback.
 
-First Garmin login is interactive (one-time): a 6-digit MFA code arrives by email, you paste it. After that the cached token in `garmin_tokens/` lives ~1 year.
+First Garmin login is interactive (one-time): a 6-digit MFA code arrives by email, you paste it. After that the cached token in `garmin_tokens/` lives ~1 month.
 
-Then deploy the server and register the webhook:
+Then deploy to Fly.io and register the webhook:
 
 ```bash
-# 1. Push to Railway (or any host that runs Procfile / gunicorn). Add all .env
-#    values as Railway env vars. The four RAILWAY_* vars enable auto-rotation
-#    of refreshed Strava tokens & session cookies back into Railway storage.
-# 2. Capture the Garmin token into a Railway env var for fresh-container bootstrap:
-python -c "import base64,pathlib; print(base64.b64encode(pathlib.Path('garmin_tokens/garmin_tokens.json').read_bytes()).decode())"
-# Paste the output as GARMIN_TOKEN_B64 on Railway.
-# 3. Pick a random string for STRAVA_WEBHOOK_VERIFY_TOKEN; put it in .env locally
-#    AND on Railway.
-# 4. After Railway is deployed and healthy, register the webhook:
+# 1. Create the app + a persistent volume (holds the rotating credentials,
+#    Garmin token, and history so they survive restarts).
+fly apps create strava-distance-fixer
+fly volumes create strava_data --region <region> --size 1
+
+# 2. Push every non-Railway secret from .env, plus the Garmin token blob.
+grep -E '^[A-Z]' .env | fly secrets import --stage
+python -c "import base64,pathlib; print('GARMIN_TOKEN_B64='+base64.b64encode(pathlib.Path('garmin_tokens/garmin_tokens.json').read_bytes()).decode())" | fly secrets import --stage
+
+# 3. Deploy. fly.toml sets DATA_DIR=/data and mounts the volume there.
+fly deploy --ha=false
+
+# 4. Register the Strava webhook (points at strava-distance-fixer.fly.dev).
 python subscribe_webhook.py
 ```
 
-`subscribe_webhook.py` deletes any existing subscription (Strava allows only one per app), then registers a fresh one pointing at the Railway domain. Strava verifies by hitting our `/strava-webhook` GET handler with the verify token; sync_server echoes the challenge back if the token matches.
+`subscribe_webhook.py` deletes any existing subscription (Strava allows only one per app), then registers a fresh one. Strava verifies by hitting the `/strava-webhook` GET handler with the verify token; sync_server echoes the challenge back if it matches.
 
-Optional (only if you want phone-triggered backup):
-- Create an iOS Shortcut with three actions: `Get Contents of URL` (POST to `https://<railway>/sync` with header `X-Sync-Secret: <SYNC_SECRET>`), `Get Dictionary Value` (key `strava_url`), `Show Notification`. Add to Home Screen.
+Optional (phone-triggered backup): create an iOS Shortcut with three actions — `Get Contents of URL` (POST to `https://strava-distance-fixer.fly.dev/sync` with header `X-Sync-Secret: <SYNC_SECRET>`), `Get Dictionary Value` (key `strava_url`), `Show Notification` — and add it to your Home Screen.
 
 ## Failure modes
 
 - **Webhook fires but crop fails** — `history.json` records `pipeline_path=failed` and the exception. Tap the iOS Shortcut or `python sync.py --force` to retry. The Strava activity is untouched on failure (we only ever POST `truncate` if everything before it succeeded).
 - **Webhook doesn't fire** — usually a Strava subscription issue. Re-run `python subscribe_webhook.py`. Verify with `curl https://www.strava.com/api/v3/push_subscriptions?client_id=...&client_secret=...`.
-- **`401 / login redirect` at the crop step** — `_strava4_session` cookie expired. Recapture from a logged-in browser, update the env var (and Railway).
-- **Garmin token cache expired (~1 year)** — re-login locally with `python sync.py` (it'll prompt for MFA), then regenerate `GARMIN_TOKEN_B64` and update Railway.
+- **`401 / login redirect` at the crop step** — `_strava4_session` cookie expired. Recapture from a logged-in browser, then `fly secrets set STRAVA_SESSION_COOKIE=...` (and update local `.env`).
+- **Garmin token cache expired (~1 month)** — re-login locally with `python sync.py` (it'll prompt for MFA), then regenerate `GARMIN_TOKEN_B64` and `fly secrets set` it. This is the one recurring manual step.
 - **Activity under 1 km / already at target** — skipped silently, recorded as `skipped_short` / `skipped_already_at_target` in history.
 
 In every failure mode the Strava activity is left exactly as Garmin's auto-sync delivered it.
@@ -118,10 +121,11 @@ In every failure mode the Strava activity is left exactly as Garmin's auto-sync 
 sync.py              entry point: run() for CLI/Shortcut path, crop_strava_activity() for webhook path
 sync_server.py       Flask server: /sync (manual), /strava-webhook (auto), / (health)
 strava_cropper.py    binary-search for end_index, POST truncate form via session cookie
-strava_uploader.py   Strava OAuth refresh, activity search, Railway env-var upsert
+strava_uploader.py   Strava OAuth refresh, activity search, credential persistence
 garmin_client.py     Garmin Connect login + activity fetch (used by CLI/Shortcut path only)
 reauth_strava.py     one-shot Strava OAuth re-authorization
 subscribe_webhook.py one-shot Strava push-subscription registration
+Dockerfile, fly.toml Fly.io deployment (volume-mounted persistent creds)
 history.json         per-run record (auto-created)
 sync.log             append-only log (auto-created)
 garmin_tokens/       cached Garmin OAuth1 token (auto-created)
@@ -143,6 +147,6 @@ Each crop appends one record:
 
 ## Security notes
 
-`.env` and `garmin_tokens/` are gitignored. Treat the Garmin OAuth1 token like a credential — it grants ~1 year of read access to the account. The `_strava4_session` cookie grants whatever a logged-in browser can do on Strava; if it leaks, sign out everywhere in Strava settings and recapture.
+`.env` and `garmin_tokens/` are gitignored. Treat the Garmin OAuth1 token like a credential — it grants read access to the account. The `_strava4_session` cookie grants whatever a logged-in browser can do on Strava; if it leaks, sign out everywhere in Strava settings and recapture.
 
-Strava OAuth tokens refresh themselves when expired; refreshed values are written back to `.env` (local) and Railway env vars (when the four `RAILWAY_*` vars are configured). The `_strava4_session` cookie rotates the same way after each successful crop — as long as the pipeline runs at least once every few weeks, the cookie effectively never expires.
+Strava OAuth tokens refresh themselves when expired; the `_strava4_session` cookie rotates after each successful crop. Both are written back to `.env` (local) and to `$DATA_DIR/creds.env` on the Fly volume when deployed, so they survive restarts. As long as the pipeline runs at least once every few weeks, the cookie effectively never expires.

@@ -1,33 +1,23 @@
-"""HTTP wrapper around sync.run() for remote triggering.
-
-Designed for Railway deployment + iOS Shortcut invocation. Single endpoint
-that runs the same Garmin → scale → Strava pipeline as `python sync.py` and
-returns the result as JSON.
+"""HTTP server for remote triggering. Deployed on Fly.io.
 
 Endpoints
 ---------
-GET  /              health check (no auth)
-POST /sync          trigger sync on latest Garmin running activity
-POST /sync?aid=<id> trigger sync on a specific activity ID
-POST /sync?force=1  re-process even if it's in history.json
+GET  /               health check (no auth)
+POST /sync           iOS-Shortcut backup: run the full Garmin → crop pipeline
+POST /strava-webhook Strava webhook: auto-crop a just-created activity
+GET  /strava-webhook Strava subscription-verify handshake
 
 Auth
 ----
-Every /sync request must include header `X-Sync-Secret: <SYNC_SECRET>` matching
-the env var. Without this anyone who knows your Railway domain could trigger
-uploads.
+/sync requires header `X-Sync-Secret: <SYNC_SECRET>`. /strava-webhook is
+verified by Strava's subscription handshake (STRAVA_WEBHOOK_VERIFY_TOKEN).
 
 Token bootstrap
 ---------------
-On startup, if env var GARMIN_TOKEN_B64 is set and the local
-garmin_tokens/garmin_tokens.json doesn't exist, decode the base64 blob and
-write it. This lets fresh Railway containers reuse a token captured locally
-without ever hitting Garmin SSO again — critical because Garmin SSO is
-aggressively rate-limited and a Railway redeploy that fell back to fresh
-login could trigger a 48-hour account lock.
-
-To capture the token blob for the env var, run locally after `python sync.py`
-has succeeded once:
+On startup, if GARMIN_TOKEN_B64 is set and no token cache exists yet (on the
+Fly volume at $DATA_DIR/garmin_tokens/), decode the blob and write it. This
+lets a fresh volume reuse a token captured locally without hitting Garmin's
+rate-limited SSO. Regenerate after each Garmin re-auth:
 
     python -c "import base64,pathlib; \
         print(base64.b64encode(pathlib.Path('garmin_tokens/garmin_tokens.json').read_bytes()).decode())"
@@ -47,15 +37,20 @@ load_dotenv()
 
 
 def _bootstrap_garmin_token() -> None:
+    """Write the Garmin token from the GARMIN_TOKEN_B64 secret if the cache is
+    empty. On a persistent volume ($DATA_DIR) the cache survives restarts, so
+    this only fires on the very first boot or after a manual token rotation."""
     blob = os.environ.get("GARMIN_TOKEN_B64", "")
     if not blob:
         return
-    target = Path(__file__).parent / "garmin_tokens" / "garmin_tokens.json"
+    data_dir = os.environ.get("DATA_DIR", "")
+    base = Path(data_dir) if data_dir else Path(__file__).parent
+    target = base / "garmin_tokens" / "garmin_tokens.json"
     if target.exists():
-        print(f"[sync_server] garmin_tokens.json exists, skipping bootstrap", flush=True)
+        print(f"[sync_server] {target} exists, skipping bootstrap", flush=True)
         return
     try:
-        target.parent.mkdir(exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(base64.b64decode(blob))
         print(f"[sync_server] wrote {target} from GARMIN_TOKEN_B64 ({len(blob)}b base64)", flush=True)
     except Exception as e:

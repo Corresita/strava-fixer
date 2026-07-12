@@ -1,0 +1,22 @@
+app = "strava-distance-fixer"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  DATA_DIR = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[[mounts]]
+  source = "strava_data"
+  destination = "/data"
