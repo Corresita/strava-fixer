@@ -303,6 +303,8 @@ The migration also let us **replace the credential-persistence mechanism**. On R
 
 Verified end to end on Fly 2026-07-11: the one real unknown — whether Strava's `_strava4_session` cookie would be honored from a datacenter IP for the crop POST — came back fine.
 
+The iOS Shortcut went away here too. It was built (v2.1–2.4) as a manual backup, but once the webhook proved reliable the Shortcut was just an extra HTTP endpoint (`/sync`) and a shared secret to maintain, exercised by nobody. Removed it and its `SYNC_SECRET`; the triggers are now webhook (automatic) + local CLI (backfill and the monthly Garmin re-auth).
+
 **Cost of ownership at v2.5:** ~$2/mo, plus re-issuing the Garmin token monthly. Everything else self-maintains.
 
 ## Lessons

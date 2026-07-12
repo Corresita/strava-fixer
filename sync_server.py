@@ -1,16 +1,14 @@
-"""HTTP server for remote triggering. Deployed on Fly.io.
+"""Webhook server. Deployed on Fly.io. Auto-crops new Strava runs.
 
 Endpoints
 ---------
-GET  /               health check (no auth)
-POST /sync           iOS-Shortcut backup: run the full Garmin → crop pipeline
-POST /strava-webhook Strava webhook: auto-crop a just-created activity
+GET  /               health check
 GET  /strava-webhook Strava subscription-verify handshake
+POST /strava-webhook Strava webhook: auto-crop a just-created activity
 
-Auth
-----
-/sync requires header `X-Sync-Secret: <SYNC_SECRET>`. /strava-webhook is
-verified by Strava's subscription handshake (STRAVA_WEBHOOK_VERIFY_TOKEN).
+The webhook is verified by Strava's subscription handshake
+(STRAVA_WEBHOOK_VERIFY_TOKEN). For manual runs / backfill, use the CLI
+(`python sync.py`) locally.
 
 Token bootstrap
 ---------------
@@ -64,45 +62,12 @@ _bootstrap_garmin_token()
 import sync  # noqa: E402
 
 app = Flask(__name__)
-SECRET = os.environ.get("SYNC_SECRET", "")
 WEBHOOK_VERIFY = os.environ.get("STRAVA_WEBHOOK_VERIFY_TOKEN", "")
-
-
-def _authorized() -> bool:
-    if not SECRET:
-        return False  # no secret configured = lock everything
-    return request.headers.get("X-Sync-Secret") == SECRET
 
 
 @app.route("/", methods=["GET"])
 def health():
     return "Strava Distance Fixer (v2 sync server) is running.", 200
-
-
-@app.route("/sync", methods=["POST"])
-def trigger_sync():
-    """Manual trigger: iOS Shortcut / curl. Runs the full Garmin → crop path."""
-    if not _authorized():
-        return jsonify({"error": "unauthorized"}), 401
-
-    aid_raw = request.args.get("aid") or request.args.get("activity_id")
-    if request.is_json:
-        body = request.get_json(silent=True) or {}
-        aid_raw = aid_raw or body.get("activity_id")
-    try:
-        aid = int(aid_raw) if aid_raw else None
-    except (TypeError, ValueError):
-        return jsonify({"error": f"invalid activity_id: {aid_raw!r}"}), 400
-
-    force = (request.args.get("force") or "").lower() in ("1", "true", "yes")
-
-    try:
-        result = sync.run(aid, force=force)
-        status = 200 if result.get("ok") else 500
-        return jsonify(result), status
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.route("/strava-webhook", methods=["GET"])

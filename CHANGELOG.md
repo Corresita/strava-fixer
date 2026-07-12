@@ -24,6 +24,10 @@ restart on every token rotation.
 ### Removed
 - `railway.toml`, `Procfile`, and `_railway_upsert_vars()` — Railway is gone.
   The `RAILWAY_*` env vars are dropped from `.env.example`.
+- The iOS Shortcut path: `POST /sync` endpoint, `_authorized()`, and the
+  `SYNC_SECRET` env var. The webhook fully automates the common case; manual
+  runs / backfill use the local CLI (`python sync.py`). Triggers are now
+  webhook + CLI.
 
 ### Verified
 - 2026-07-11: full pipeline runs on Fly — Garmin token loads from the volume,

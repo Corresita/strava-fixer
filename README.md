@@ -46,15 +46,14 @@ Strava's UI warns "This action cannot be undone." Cropped GPS points really are 
 
 ## Triggers
 
-There are three ways to invoke the same crop pipeline. The webhook is the default; the others are for fallback and ad-hoc use.
+Two ways to invoke the same crop pipeline. The webhook runs everything automatically; the CLI is for debugging and backfilling old activities.
 
 | Trigger | When it fires | Code path |
 | --- | --- | --- |
 | **Strava webhook** (default) | Automatic, seconds after Garmin → Strava sync completes | `POST /strava-webhook` → `sync.crop_strava_activity()` |
-| iOS Shortcut (backup) | You tap a Home Screen icon | `POST /sync` with `X-Sync-Secret` → `sync.run()` (does the full Garmin lookup + wait + crop) |
-| CLI (debug / backfill) | You run a command on your laptop | `python sync.py [activity_id] [--force]` → same `sync.run()` |
+| CLI (debug / backfill / monthly Garmin re-auth) | You run a command on your laptop | `python sync.py [activity_id] [--force]` → `sync.run()` |
 
-All three end up calling `strava_cropper.crop_to_distance()` with the same target and producing the same result.
+Both end up calling `strava_cropper.crop_to_distance()` with the same target and producing the same result.
 
 ## Requirements
 
@@ -103,11 +102,9 @@ python subscribe_webhook.py
 
 `subscribe_webhook.py` deletes any existing subscription (Strava allows only one per app), then registers a fresh one. Strava verifies by hitting the `/strava-webhook` GET handler with the verify token; sync_server echoes the challenge back if it matches.
 
-Optional (phone-triggered backup): create an iOS Shortcut with three actions — `Get Contents of URL` (POST to `https://strava-distance-fixer.fly.dev/sync` with header `X-Sync-Secret: <SYNC_SECRET>`), `Get Dictionary Value` (key `strava_url`), `Show Notification` — and add it to your Home Screen.
-
 ## Failure modes
 
-- **Webhook fires but crop fails** — `history.json` records `pipeline_path=failed` and the exception. Tap the iOS Shortcut or `python sync.py --force` to retry. The Strava activity is untouched on failure (we only ever POST `truncate` if everything before it succeeded).
+- **Webhook fires but crop fails** — `history.json` records `pipeline_path=failed` and the exception. Run `python sync.py <activity_id> --force` locally to retry. The Strava activity is untouched on failure (we only ever POST `truncate` if everything before it succeeded).
 - **Webhook doesn't fire** — usually a Strava subscription issue. Re-run `python subscribe_webhook.py`. Verify with `curl https://www.strava.com/api/v3/push_subscriptions?client_id=...&client_secret=...`.
 - **`401 / login redirect` at the crop step** — `_strava4_session` cookie expired. Recapture from a logged-in browser, then `fly secrets set STRAVA_SESSION_COOKIE=...` (and update local `.env`).
 - **Garmin token cache expired (~1 month)** — re-login locally with `python sync.py` (it'll prompt for MFA), then regenerate `GARMIN_TOKEN_B64` and `fly secrets set` it. This is the one recurring manual step.
@@ -118,11 +115,11 @@ In every failure mode the Strava activity is left exactly as Garmin's auto-sync 
 ## Files
 
 ```
-sync.py              entry point: run() for CLI/Shortcut path, crop_strava_activity() for webhook path
-sync_server.py       Flask server: /sync (manual), /strava-webhook (auto), / (health)
+sync.py              entry point: run() for the CLI path, crop_strava_activity() for the webhook path
+sync_server.py       Flask server: /strava-webhook (auto-crop), / (health)
 strava_cropper.py    binary-search for end_index, POST truncate form via session cookie
 strava_uploader.py   Strava OAuth refresh, activity search, credential persistence
-garmin_client.py     Garmin Connect login + activity fetch (used by CLI/Shortcut path only)
+garmin_client.py     Garmin Connect login + activity fetch (used by the CLI path only)
 reauth_strava.py     one-shot Strava OAuth re-authorization
 subscribe_webhook.py one-shot Strava push-subscription registration
 Dockerfile, fly.toml Fly.io deployment (volume-mounted persistent creds)
