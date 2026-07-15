@@ -307,6 +307,24 @@ The iOS Shortcut went away here too. It was built (v2.1–2.4) as a manual backu
 
 **Cost of ownership at v2.5:** ~$2/mo, plus re-issuing the Garmin token monthly. Everything else self-maintains.
 
+## Known limitation: crop resets elevation gain
+
+Cropping changes more than distance. Any edit to a GPS activity makes Strava **re-derive every stream metric** from the trimmed track using its own algorithm — and for elevation that means discarding the device's barometric value and recomputing.
+
+Confirmed on activity 19288038293 (`Paton Peak + Coliseum Mt`, a 30.31 km run with real climbing):
+
+| Elevation source | Gain |
+| --- | --- |
+| Garmin fēnix 7x Pro barometric value (what Strava showed pre-crop) | 1658 m |
+| Strava's recompute from the altitude stream, with its smoothing (post-crop) | **1701 m** |
+| Raw altitude stream, no smoothing (25,763 points, Σ positive deltas) | 1916 m |
+
+The +43 m is **not** from the ~10 m of track we trimmed — removing points can only lower or hold a gain, never raise it. It's Strava's smoothing being slightly less aggressive than Garmin's. The crop flips the elevation source from *device-reported* to *Strava-computed*, and the two disagree by a few percent. On flat runs the two nearly match, which is why this went unnoticed until a 1600 m-climb activity exposed it.
+
+There is no lever. The `/truncate` form takes only `start_index` / `end_index` — no elevation field — and no Strava API lets you set elevation gain on a GPS activity (same fundamental limit as distance). It can't be minimized by choosing which end to trim either: the recompute is global, triggered by *any* edit, not by the specific points removed. The only way to keep the device elevation would be to never let Strava re-derive — i.e. modify the file before upload — which is the delete-and-reupload path we ruled out (DELETE 401, loses kudos).
+
+Accepted as an inherent cost of the crop method: you trade an exact distance for a slightly-recomputed elevation number.
+
 ## Lessons
 
 - **Don't try to modify data Strava already owns.** Strava treats every GPS activity's distance as a derived value. There is no API and no UI surface to override it, and the company appears to be removing the few that existed.
@@ -315,6 +333,7 @@ The iOS Shortcut went away here too. It was built (v2.1–2.4) as a manual backu
 - **Test with the actual page, not just the API.** We spent v1.5 building a web form scraper assuming the distance field still existed in the HTML. It didn't. One DevTools peek would have saved that work.
 - **A working pipeline isn't a finished feature.** v2.1 deploys, the iOS Shortcut fires, the server responds — looks complete. But the Strava `DELETE` step it depends on silently 401s in production. Always probe each step's actual *outcome* on the real target, not just whether the code ran.
 - **Token rotation doesn't mean token replacement.** After regenerating Strava's Client Secret and re-authorizing, the old refresh token was still active (Strava reuses refresh tokens across re-auths within the same grant context). We had to explicitly *revoke* the app in Strava settings before reauth would actually mint a new refresh token.
+- **Editing one derived field re-derives them all.** The crop targets distance, but any track edit makes Strava recompute elevation, pace, and moving time from scratch — swapping the device's barometric elevation for Strava's own. You don't get to touch a single number in isolation; the whole derived set moves. Verify the *other* metrics after an edit, not just the one you meant to change.
 - **The right architecture from day one was a webhook.** v1.0 was a Flask service receiving Strava activity-create events on Railway. v2.4 is — almost identically — a Flask service receiving Strava activity-create events on Railway. Six versions in between were all wrong about the *call to make on the event*, not wrong about the trigger shape. The discovery work (web Crop form, session-cookie auth, CSRF parsing, floor display) was the entire content of those six versions. Architecturally, the project ends where it started.
 - **Verify on the actual UI, not the API response.** Today's crop log said `27.2680m → 27.27 km`. The Strava API echoed that distance. Strava's web UI displayed `27.26 km`. The whole `27.27 → 27.26` floor-display bug would have been visible if the first crop test had ended with a screenshot of Strava's activity page, not just a JSON dump.
 - **Persist credentials without triggering restarts.** Both Railway's and Fly's "set a secret" APIs redeploy the machine. Using them for per-request token rotation means a refresh mid-webhook can restart the container and kill an in-flight job. A file on a mounted volume persists just as well, with no restart and no API call.
